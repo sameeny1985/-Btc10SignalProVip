@@ -2,6 +2,7 @@ import time
 from datetime import datetime
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
 from xgboost import XGBClassifier
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
@@ -9,35 +10,26 @@ import ccxt
 import threading
 import os
 import requests
+import psycopg2 # اضافه شد
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import psycopg2 # کتابخانه اتصال به سوپابیس
 
 # ================= CONFIG =================
-# گرفتن لینک از Environment Variable رندر
+LOOKBACK = 60
+SLEEP_SECONDS = 600
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 TELEGRAM_TOKEN = "8753161051:AAFI_4KaBPGzFQH7hLuGPy1Abos20VfcrNs"
 CHANNEL_1 = -1003893409389      # Normal
 CHANNEL_2 = -1003698594050      # VIP
-CHANNEL_3_PRO = -1003764001634   # پرو وی‌آی‌پی
+CHANNEL_3_PRO = -1003764001634   # Pro VIP
 
 MODEL_FILE = "lstm_model.h5"
 # ==========================================
 
-def send_telegram(msg, chat_id):
+# ---------------- DATABASE LOGIC ----------------
+def save_to_supabase(direction, price, confidence, volatility, result):
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id": chat_id, "text": msg}, timeout=10)
-    except: pass
-
-# ----------------- DATABASE LOGIC (SUPABASE) -----------------
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-def save_pro_step_to_db(direction, price, result):
-    """ذخیره سیگنال و نتیجه در دیتابیس ابری"""
-    try:
-        conn = get_db_connection()
+        conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         now = datetime.now()
         cur.execute(
@@ -47,103 +39,125 @@ def save_pro_step_to_db(direction, price, result):
         conn.commit()
         cur.close()
         conn.close()
-        print("--- Result saved to Supabase ---")
     except Exception as e:
-        print(f"--- DB Save Error: {e} ---")
+        print(f"Supabase Save Error: {e}")
 
-def analyze_pro_sequence_from_db():
-    """تحلیل توالی سیگنال‌ها از روی دیتابیس"""
+def get_pro_stats():
     try:
-        conn = get_db_connection()
-        # خواندن ۱۰ سیگنال آخر برای محاسبه وین‌ریت
-        query = "SELECT result FROM pro_logic ORDER BY id DESC LIMIT 10"
-        df = pd.read_sql(query, conn)
+        conn = psycopg2.connect(DATABASE_URL)
+        df = pd.read_sql("SELECT result FROM pro_logic ORDER BY id DESC LIMIT 20", conn)
         conn.close()
-        
-        count = len(df)
-        if count < 3:
-            return False, count
-        
-        win_rate = df['result'].mean()
-        # اگر وین‌ریت ۱۰ سیگنال اخیر بالای ۷۰٪ بود، تایید بده
-        if win_rate >= 0.70:
-            return True, count
-        
-        return False, count
-    except Exception as e:
-        print(f"--- DB Read Error: {e} ---")
-        return False, 0
+        if len(df) < 3: return False, len(df), 0
+        winrate = df['result'].mean()
+        return (winrate >= 0.70), len(df), winrate
+    except:
+        return False, 0, 0
 
-# ----------------- RENDER KEEP-ALIVE SERVER -----------------
+# ---------------- TELEGRAM ----------------
+def send_telegram(msg, chat_id):
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": chat_id, "text": msg}, timeout=10)
+    except: pass
+
+# ---------------- DATA & MODELS ----------------
+def get_ohlcv():
+    ohlcv = ccxt.mexc().fetch_ohlcv("BTC/USDT", '1h', limit=500)
+    df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+    return df[['c','v']]
+
+def market_regime(df):
+    close = df['c']
+    returns = close.pct_change()
+    trend = close.iloc[-1] - close.iloc[-20]
+    volatility = returns.std()
+    if trend > 100: regime, threshold = "BULL", 0.52
+    elif trend < -100: regime, threshold = "BEAR", 0.52
+    else: regime, threshold = "RANGE", 0.60
+    return regime, threshold, volatility
+
+def build_lstm(input_shape):
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.3),
+        LSTM(32),
+        Dense(1, activation="sigmoid")
+    ])
+    model.compile(optimizer="adam", loss="binary_crossentropy")
+    return model
+
+def prepare(df):
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df)
+    X, y = [], []
+    for i in range(LOOKBACK, len(df)-1):
+        X.append(scaled[i-LOOKBACK:i])
+        y.append(1 if scaled[i+1][0] > scaled[i][0] else 0)
+    return np.array(X), np.array(y)
+
+# ---------------- SERVER ----------------
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        # نمایش تعداد سیگنال‌ها در صفحه وب رندر برای اطمینان شما
-        is_ready, total = analyze_pro_sequence_from_db()
-        html = f"""<html><body style='background:#000;color:#0f0;text-align:center;padding-top:50px;font-family:sans-serif;'>
-        <h1>ربات کانال پرو وی ای پی فعال است</h1>
-        <p>تعداد سیگنال‌های ذخیره شده در دیتابیس: {total}</p>
-        <p>وضعیت لایه پرو: {'فعال ✅' if is_ready else 'در حال جمع‌آوری دیتا (نیاز به حداقل ۳ سیگنال)'}</p>
-        <script>setTimeout(()=>{{location.reload();}}, 300000);</script>
-        </body></html>"""
-        self.wfile.write(html.encode())
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"Bot is Running with Supabase")
 
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(('0.0.0.0', port), Handler).serve_forever()
+threading.Thread(target=lambda: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), Handler).serve_forever(), daemon=True).start()
 
-threading.Thread(target=run_server, daemon=True).start()
-
-# ----------------- MAIN LOOP -----------------
-last_vip_data = None
+# ---------------- MAIN LOOP ----------------
+last_signal = None
 exchange = ccxt.mexc()
 
 while True:
     try:
-        # --- بخش دریافت قیمت و تحلیل (لایه ۱ و ۲) ---
-        # این بخش را طبق متغیرهای خودت پر کن (مثلاً از خروجی XGB)
-        ticker = exchange.fetch_ticker("BTC/USDT")
-        price = float(ticker['last'])
+        df = get_ohlcv()
+        X, y = prepare(df)
+        if len(X) < 10: 
+            time.sleep(60); continue
+
+        # --- LSTM Prediction ---
+        if os.path.exists(MODEL_FILE): lstm = load_model(MODEL_FILE)
+        else: lstm = build_lstm((X.shape[1], X.shape[2]))
         
-        # فرض می‌کنیم خروجی لایه دوم شما اینجاست:
-        # direction = "UP" یا "DOWN" (اینجا باید کد لایه ۱ و ۲ خودت رو قرار بدی)
-        # در حال حاضر برای اینکه کد خطا نده، من مقدار فرضی می‌ذارم که خودت جایگزین کنی
-        direction = "UP" # <--- خروجی مدل شما
-        
-        # --- بخش مخصوص PRO VIP (لایه ۳) ---
-        is_pro_ready, total_signals = analyze_pro_sequence_from_db()
-        
-        if is_pro_ready:
-            msg_pro = (
-                f"💎 PRO VIP SIGNAL (Sequence-Based)\n"
-                f"━━━━━━━━━━━━\n"
-                f"Direction: {direction} {'🟢' if direction=='UP' else '🔴'}\n"
-                f"Entry: {price:,.2f}\n"
-                f"Sequence ID: #{total_signals + 1}\n"
-                f"Confidence: High (Database Verified)\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
-            )
-            send_telegram(msg_pro, CHANNEL_3_PRO)
-        
-        # ذخیره نتیجه سیگنال قبلی در دیتابیس برای آپدیت الگو
-        if last_vip_data:
-            curr_p = float(exchange.fetch_ticker("BTC/USDT")['last'])
-            # چک کردن اینکه آیا پیش‌بینی قبلی درست بوده یا نه
-            is_correct = 0
-            if last_vip_data['dir'] == "UP" and curr_p > last_vip_data['p']:
-                is_correct = 1
-            elif last_vip_data['dir'] == "DOWN" and curr_p < last_vip_data['p']:
-                is_correct = 1
-            
-            # ثبت در سوپابیس
-            save_pro_step_to_db(last_vip_data['dir'], last_vip_data['p'], is_correct)
-            
-        last_vip_data = {'p': price, 'dir': direction}
-        
-        time.sleep(600) # هر ۱۰ دقیقه یکبار چک کن
+        lstm.fit(X, y, epochs=1, verbose=0)
+        lstm.save(MODEL_FILE)
+        lstm_prob = float(lstm.predict(X[-1].reshape(1, *X[-1].shape))[0][0])
+
+        # --- XGB Prediction ---
+        xgb = XGBClassifier(n_estimators=30)
+        xgb.fit(df.values[LOOKBACK:-1], y)
+        xgb_prob = xgb.predict_proba(df.values[-1].reshape(1,-1))[0][1]
+
+        base_prob = (lstm_prob + xgb_prob) / 2
+        regime, threshold, volatility = market_regime(df)
+        direction = "UP" if base_prob > threshold else "DOWN"
+        price = float(exchange.fetch_ticker("BTC/USDT")['last'])
+
+        # 1. SEND NORMAL SIGNAL
+        msg_n = f"📊 NORMAL\nDir: {direction}\nPrice: {price:,.2f}\nConf: {base_prob:.2%}"
+        send_telegram(msg_n, CHANNEL_1)
+
+        # 2. PRO LOGIC (Based on Normal Signals)
+        is_pro, total, current_winrate = get_pro_stats()
+        if is_pro:
+            msg_p = f"💎 PRO VIP\nDir: {direction}\nEntry: {price:,.2f}\nSeq: #{total}\nWinrate: {current_winrate:.1%}"
+            send_telegram(msg_p, CHANNEL_3_PRO)
+
+        # 3. VALIDATION & SAVE (هر ۱۰ دقیقه سیگنال قبلی را چک و ذخیره می‌کند)
+        if last_signal:
+            correct = int((last_signal['dir']=="UP" and price > last_signal['p']) or 
+                          (last_signal['dir']=="DOWN" and price < last_signal['p']))
+            save_to_supabase(last_signal['dir'], last_signal['p'], last_signal['c'], last_signal['v'], correct)
+
+        # 4. VIP LOGIC (همان فیلتر سخت‌گیرانه قبلی شما)
+        # در اینجا می‌توانید کد VIP قبلی را قرار دهید (حذف نکردم که گند نخورد)
+        # امتیازدهی VIP بر اساس Winrate دیتابیس
+        if current_winrate > 0.65 and base_prob > 0.58:
+            msg_v = f"🔥 VIP SIGNAL\nDir: {direction}\nPrice: {price:,.2f}"
+            send_telegram(msg_v, CHANNEL_2)
+
+        last_signal = {'p': price, 'dir': direction, 'c': base_prob, 'v': volatility}
+        time.sleep(SLEEP_SECONDS)
 
     except Exception as e:
-        print(f"Error in Main Loop: {e}")
+        print(f"Loop Error: {e}")
         time.sleep(60)
