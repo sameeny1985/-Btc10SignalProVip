@@ -9,7 +9,6 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 import ccxt
 import threading
 import os
-import psycopg2
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= CONFIG =================
@@ -17,114 +16,253 @@ LOOKBACK = 60
 SLEEP_SECONDS = 600
 
 TELEGRAM_TOKEN = "8753161051:AAFI_4KaBPGzFQH7hLuGPy1Abos20VfcrNs"
-CHANNEL_NORMAL = -1003893409389
-CHANNEL_PRO_VIP = -1003764001634 # کانال پرو طبق درخواست شما
-
-# پارامترهای دیتابیس برای جلوگیری از ارور کاراکتر @
+CHANNEL_1 = -1003893409389
+CHANNEL_2 = -1003698594050
+# تنظیمات دیتابیس
 DB_PARAMS = "host=aws-0-eu-west-1.pooler.supabase.com port=5432 dbname=postgres user=postgres.xgrfkdordxyyirqkzoxx password=Hs@11557788"
+CHANNEL_PRO_VIP = -1003764001634
+HISTORY_FILE = "trading_history.csv"
 MODEL_FILE = "lstm_model.h5"
 # ==========================================
 
+# ---------------- TELEGRAM ----------------
 def send_telegram(msg, chat_id):
     import requests
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                     json={"chat_id": chat_id, "text": msg}, timeout=10)
-    except: pass
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": msg}
+        )
+    except:
+        pass
 
-def get_db_logic():
+# ---------------- DATA ----------------
+def get_price():
+    return float(ccxt.mexc().fetch_ticker("BTC/USDT")['last'])
+
+def get_ohlcv():
+    ohlcv = ccxt.mexc().fetch_ohlcv("BTC/USDT", '1h', limit=500)
+    df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+    return df[['c','v']]
+
+# ---------------- MARKET REGIME ----------------
+def market_regime(df):
+    close = df['c']
+    returns = close.pct_change()
+
+    trend = close.iloc[-1] - close.iloc[-20]
+    volatility = returns.std()
+
+    if trend > 100:
+        regime = "BULL"
+        threshold = 0.52
+    elif trend < -100:
+        regime = "BEAR"
+        threshold = 0.52
+    else:
+        regime = "RANGE"
+        threshold = 0.60
+
+    return regime, threshold, volatility
+
+# ---------------- LSTM ----------------
+def build_lstm(input_shape):
+    model = Sequential()
+    model.add(LSTM(64, return_sequences=True, input_shape=input_shape))
+    model.add(Dropout(0.3))
+    model.add(LSTM(32))
+    model.add(Dense(1, activation="sigmoid"))
+    model.compile(optimizer="adam", loss="binary_crossentropy")
+    return model
+
+def prepare(df):
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df)
+
+    X, y = [], []
+    for i in range(LOOKBACK, len(df)-1):
+        X.append(scaled[i-LOOKBACK:i])
+        y.append(1 if scaled[i+1][0] > scaled[i][0] else 0)
+
+    return np.array(X), np.array(y)
+
+# ---------------- META MODEL ----------------
+def train_meta_model():
+    if not os.path.exists(HISTORY_FILE):
+        return None, 0.5
+
+    df = pd.read_csv(HISTORY_FILE)
+
+    if len(df) < 5:
+        return None, 0.5
+
+    df['weight'] = np.linspace(0.1, 1.0, len(df))
+
+    if len(df) > 15000:
+        df = df.sample(15000, weights=df['weight'])
+
+    X = df[['confidence','volatility']]
+    y = df['result']
+    w = df['weight']
+
+    winrate = y.mean()
+
+    model = XGBClassifier(n_estimators=100, max_depth=4)
+    model.fit(X, y, sample_weight=w)
+
+    return model, winrate
+
+# ---------------- SAVE ----------------
+def save_trade(data):
+    pd.DataFrame([data]).to_csv(
+        HISTORY_FILE,
+        mode='a',
+        header=not os.path.exists(HISTORY_FILE),
+        index=False
+    )
+
+# ---------------- SERVER (FIXED PORT) ----------------
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"alive")
+
+PORT = int(os.environ.get("PORT", 10000))
+
+def run_server():
+    server = HTTPServer(('0.0.0.0', PORT), Handler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+
+# ---------------- MEMORY ----------------
+last_trade = None
+def get_db_slot_count():
+    import psycopg2
     try:
         conn = psycopg2.connect(DB_PARAMS)
         cur = conn.cursor()
         slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
         cur.execute("SELECT COUNT(id) FROM pro_logic WHERE hour_slot = %s", (slot,))
         count = cur.fetchone()[0]
-        conn.close()
+        cur.close(); conn.close()
         return slot, count
-    except: return f"{datetime.now().hour}:{datetime.now().minute // 10}", 0
-
-def save_to_db(direction, price, result):
-    try:
-        conn = psycopg2.connect(DB_PARAMS)
-        cur = conn.cursor()
-        slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
-        cur.execute("INSERT INTO pro_logic (hour_slot, direction, price, result) VALUES (%s, %s, %s, %s)",
-                    (slot, direction, price, result))
-        conn.commit(); conn.close()
-    except: pass
-
-def get_ohlcv():
-    ohlcv = ccxt.mexc().fetch_ohlcv("BTC/USDT", '1h', limit=300)
-    df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-    return df[['c','v']]
-
-def build_lstm(input_shape):
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=input_shape),
-        Dropout(0.3),
-        LSTM(32),
-        Dense(1, activation="sigmoid")
-    ])
-    model.compile(optimizer="adam", loss="binary_crossentropy")
-    return model
-
-# ---------------- SERVER ----------------
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers()
-        self.wfile.write(b"LSTM PRO ACTIVE")
-
-threading.Thread(target=lambda: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), Handler).serve_forever(), daemon=True).start()
-
-# ---------------- MAIN ----------------
-last_trade = None
-
+    except:
+        return f"{datetime.now().hour}:{datetime.now().minute // 10}", 0
+# ================= MAIN LOOP =================
 while True:
     try:
         df = get_ohlcv()
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df)
-        
-        X = np.array([scaled[-LOOKBACK:]])
-        y_train = np.array([1 if df['c'].iloc[-1] > df['c'].iloc[-2] else 0])
+        X, y = prepare(df)
 
-        # LSTM Logic
+        if len(X) < 10:
+            time.sleep(60)
+            continue
+
+        # -------- LSTM MODEL --------
         if os.path.exists(MODEL_FILE):
             lstm = load_model(MODEL_FILE)
         else:
-            lstm = build_lstm((LOOKBACK, 2))
-        
-        # لود مدل و پیش‌بینی
-        prob = float(lstm.predict(X, verbose=0)[0][0])
-        direction = "UP" if prob > 0.50 else "DOWN"
-        price = float(ccxt.mexc().fetch_ticker("BTC/USDT")['last'])
+            lstm = build_lstm((X.shape[1], X.shape[2]))
 
-        # ۱. ارسال به کانال معمولی
-        msg_normal = f"📊 NORMAL (LSTM)\nDir: {direction}\nPrice: {price:,.2f}\nProb: {prob:.2%}"
-        send_telegram(msg_normal, CHANNEL_NORMAL)
+        lstm.fit(X, y, epochs=1, verbose=0)
+        lstm.save(MODEL_FILE)
 
-        # ۲. منطق زمانی دیتابیس و ارسال به VIP
-        slot, seq = get_db_slot()
-        msg_vip = (
-            f"💎 PRO VIP SIGNAL\n"
-            f"━━━━━━━━━━━━\n"
-            f"Direction: {direction} {'🟢' if direction=='UP' else '🔴'}\n"
-            f"Entry: {price:,.2f}\n"
-            f"Time Slot: {slot}0\n"
-            f"Sequence: #{seq + 1}\n"
-            f"Logic: Historical Pattern Verified"
+        lstm_prob = float(lstm.predict(X[-1].reshape(1,*X[-1].shape))[0][0])
+
+        # -------- XGBOOST MODEL --------
+        xgb = XGBClassifier(n_estimators=30)
+        xgb.fit(df.values[LOOKBACK:-1], y)
+        xgb_prob = xgb.predict_proba(df.values[-1].reshape(1,-1))[0][1]
+
+        # ترکیب دو مدل
+        base_prob = (lstm_prob + xgb_prob) / 2
+        regime, threshold, volatility = market_regime(df)
+        direction = "UP" if base_prob > threshold else "DOWN"
+
+        price = get_price()
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        # 1️⃣ ارسال سیگنال عادی (Normal Channel)
+        msg_normal = (
+            f"⚠️ **SHAPYAAR Btc Signal**\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🪙 **Symbol:** #BTC / USDT\n"
+            f"📅 **Date:** `{date_str}`\n"
+            f"⏰ **Time:** `{time_str}` (UTC)\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🔔 **Direction:** {direction} {'🟢' if direction=='UP' else '🔴'}\n"
+            f"💵 **Price:** `${price:,.2f}`\n"
+            f"📊 **Regime:** {regime}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🆔 @Btc10SignalProVip"
         )
-        send_telegram(msg_vip, CHANNEL_PRO_VIP)
+        send_telegram(msg_normal, CHANNEL_1)
 
-        # ذخیره نتیجه برای یادگیری توالی زمانی
+        # 2️⃣ ارسال سیگنال پرو (VIP Channel - منطق زمانی)
+        slot, seq = get_db_slot_count() # فراخوانی تابع دیتابیس
+
+        vip_text = (
+            f"💎 **SHAPYAAR Btc VIP Signal**\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🪙 **Symbol:** #BTC / USDT\n"
+            f"📅 **Date:** `{date_str}`\n"
+            f"⏰ **Time:** `{time_str}`\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🚀 **Action:** {'BUY' if direction=='UP' else 'SELL'} {'🟢' if direction=='UP' else '🔴'}\n"
+            f"📉 **Entry Price:** `${price:,.2f}`\n"
+            f"🎯 **Confidence:** {base_prob:.2%}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"📥 **Data Analysis:**\n"
+            f"📍 **Slot ID:** `{slot}0` (Time-Based)\n"
+            f"🔢 **Sequence:** `#{seq + 1}`\n"
+            f"🧠 **Model:** Hybrid LSTM+XGB\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👑 **VIP EXCLUSIVE**"
+        )
+        send_telegram(vip_text, CHANNEL_PRO_VIP)
+
+        # 3️⃣ بررسی سیگنال قبلی و ذخیره در دیتابیس (VALIDATE)
         if last_trade:
-            correct = int((last_trade["dir"]=="UP" and price>last_trade["p"]) or 
-                         (last_trade["dir"]=="DOWN" and price<last_trade["p"]))
-            save_to_db(last_trade["dir"], last_trade["p"], correct)
+            correct = int(
+                (last_trade["direction"]=="UP" and price > last_trade["price"]) or
+                (last_trade["direction"]=="DOWN" and price < last_trade["price"])
+            )
 
-        last_trade = {"dir": direction, "p": price}
+            # ذخیره در فایل محلی CSV
+            save_trade({
+                "confidence": last_trade["confidence"],
+                "volatility": last_trade["volatility"],
+                "result": correct
+            })
+
+            # ذخیره در دیتابیس سوپابیس (Supabase)
+            try:
+                import psycopg2
+                conn = psycopg2.connect(DB_PARAMS)
+                cur = conn.cursor()
+                db_slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
+                cur.execute("INSERT INTO pro_logic (hour_slot, direction, price, result) VALUES (%s, %s, %s, %s)",
+                            (db_slot, last_trade["direction"], last_trade["price"], correct))
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as db_err:
+                print(f"DB Error: {db_err}")
+
+        # آپدیت برای سیگنال بعدی
+        last_trade = {
+            "price": price,
+            "direction": direction,
+            "confidence": base_prob,
+            "volatility": volatility
+        }
+
         time.sleep(SLEEP_SECONDS)
 
     except Exception as e:
-        print("ERROR:", e)
+        print("ERROR IN LOOP:", e)
         time.sleep(60)
