@@ -4,15 +4,15 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 
-# --- ۱. باز کردن سریع پورت برای رندر ---
+# ۱. استارت سریع پورت برای رندر (سبز شدن دیپلوی)
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
-        self.wfile.write(b"PRO VIP - 24H TIME ANALYSIS LIVE")
+        self.wfile.write(b"PRO VIP - 24H ANALYSIS ONLINE")
 
 threading.Thread(target=lambda: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), Handler).serve_forever(), daemon=True).start()
 
-# --- ۲. ایمپورت‌ها ---
+# ۲. کتابخانه‌ها
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -33,35 +33,25 @@ LOOKBACK = 60
 # ==========================================
 
 def get_time_slot_data():
-    """
-    فقط ساعت و دقیقه فعلی را چک می‌کند.
-    اگر در این تایم‌اسلات قبلاً سیگنالی ثبت شده باشد، آن را به عنوان الگو شناسایی می‌کند.
-    """
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         now = datetime.now()
-        # ایجاد یک شناسه زمانی بر اساس ساعت و ده دقیقه (مثلاً 14:10, 14:20)
-        time_slot = f"{now.hour}:{now.minute // 10}"
-        
-        # چک کردن سوابق در این تایم‌اسلات (بدون محدودیت روز هفته)
-        cur.execute("SELECT COUNT(id) FROM pro_logic WHERE hour_slot = %s", (time_slot,))
+        slot = f"{now.hour}:{now.minute // 10}" # اسلات ۱۰ دقیقه‌ای
+        cur.execute("SELECT COUNT(id) FROM pro_logic WHERE hour_slot = %s", (slot,))
         count = cur.fetchone()[0]
-        
         conn.close()
-        return time_slot, count
-    except:
-        return "00:0", 0
+        return slot, count
+    except: return "00:0", 0
 
 def save_to_db(direction, price, result):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         now = datetime.now()
-        time_slot = f"{now.hour}:{now.minute // 10}"
-        # ذخیره با فیلد hour_slot برای تحلیل ۲۴ ساعته
+        slot = f"{now.hour}:{now.minute // 10}"
         cur.execute("INSERT INTO pro_logic (hour_slot, direction, price, result) VALUES (%s, %s, %s, %s)",
-                    (time_slot, direction, price, result))
+                    (slot, direction, price, result))
         conn.commit(); cur.close(); conn.close()
     except: pass
 
@@ -69,12 +59,13 @@ def send_telegram(msg, chat_id):
     try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=10)
     except: pass
 
-# --- MAIN ---
+# --- بدنه اصلی ---
 exchange = ccxt.mexc()
-# لود مدل
 model = Sequential([LSTM(64, return_sequences=True, input_shape=(LOOKBACK, 2)), Dropout(0.3), LSTM(32), Dense(1, activation="sigmoid")])
 model.compile(optimizer="adam", loss="binary_crossentropy")
 last_signal = None
+
+print("Bot is starting its 24h analysis...")
 
 while True:
     try:
@@ -85,27 +76,29 @@ while True:
         direction = "UP" if prob > 0.52 else "DOWN"
         price = float(exchange.fetch_ticker("BTC/USDT")['last'])
 
-        # ۱. ارسال نرمال
+        # ارسال سیگنال نرمال
         send_telegram(f"📊 NORMAL SIGNAL\nDir: {direction}\nPrice: {price:,.2f}", CHANNEL_1)
         
-        # ۲. تحلیل لایه پرو (فقط بر اساس ساعت و دقیقه در ۲۴ ساعت)
+        # ارسال سیگنال پرو (بدون شرط درصد - فقط بر اساس ساعت و دقیقه)
         slot, seq = get_time_slot_data()
-        
         msg_p = (
             f"💎 PRO VIP SIGNAL\n"
             f"━━━━━━━━━━━━\n"
             f"Direction: {direction}\n"
-            f"Target Slot: {slot}0\n"
-            f"Historical Hits: {seq}\n"
-            f"Status: Time Pattern Confirmed"
+            f"Price: {price:,.2f}\n"
+            f"Time Slot: {slot}0\n"
+            f"Pattern Hits: {seq + 1}"
         )
         send_telegram(msg_p, CHANNEL_3_PRO)
 
-        # ۳. ذخیره برای یادگیری ساعت بعدی
+        # ثبت نتیجه برای یادگیری الگوی ساعت بعد
         if last_signal:
-            success = int((last_signal['dir'] == "UP" and price > last_signal['p']) or (last_signal['dir'] == "DOWN" and price < last_signal['p']))
+            current_p = float(exchange.fetch_ticker("BTC/USDT")['last'])
+            success = int((last_signal['dir'] == "UP" and current_p > last_signal['p']) or (last_signal['dir'] == "DOWN" and current_p < last_signal['p']))
             save_to_db(last_signal['dir'], last_signal['p'], success)
 
         last_signal = {'p': price, 'dir': direction}
-        time.sleep(600)
-    except: time.sleep(60)
+        time.sleep(600) # ده دقیقه صبر
+    except Exception as e:
+        print(f"Error: {e}")
+        time.sleep(60)
