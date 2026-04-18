@@ -3,40 +3,34 @@ import os
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ۱. راه اندازی سریع سرور برای جلوگیری از Timed Out در رندر
+# --- ۱. بخش حیاتی: باز کردن سریع پورت برای رندر ---
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is Alive and Loading...")
+        self.wfile.write(b"BTC PRO VIP IS ONLINE")
 
-def run_health_check_server():
+def start_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), Handler)
-    print(f"Health check server started on port {port}")
+    print(f"Port {port} opened successfully!")
     server.serve_forever()
 
-# استارت پورت در ثانیه اول اجرای کد
-threading.Thread(target=run_health_check_server, daemon=True).start()
+# پورت رو همین الان باز کن قبل از اینکه سراغ ایمپورت‌های سنگین بری
+threading.Thread(target=start_server, daemon=True).start()
+print("Health check is LIVE. Now loading AI...")
 
-print("Web server is up. Now loading heavy AI libraries...")
-
-# ۲. حالا ایمپورت‌های سنگین را انجام می‌دهیم
+# --- ۲. حالا ایمپورت‌های سنگین رو انجام بده ---
+from datetime import datetime
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-from xgboost import XGBClassifier
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 import ccxt
 import requests
 import psycopg2 
-from datetime import datetime
-
-# حذف هشدارهای اضافه
-import warnings
-warnings.filterwarnings("ignore")
 
 # ================= CONFIG =================
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -46,8 +40,8 @@ CHANNEL_2 = -1003698594050
 CHANNEL_3_PRO = -1003764001634   
 MODEL_FILE = "lstm_model.h5"
 LOOKBACK = 60
+# ==========================================
 
-# ---------------- FUNCTIONS ----------------
 def get_pro_stats():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -73,7 +67,7 @@ def save_to_supabase(direction, price, result):
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e: print(f"DB Error: {e}")
+    except: pass
 
 def send_telegram(msg, chat_id):
     try:
@@ -81,12 +75,10 @@ def send_telegram(msg, chat_id):
                       json={"chat_id": chat_id, "text": msg}, timeout=10)
     except: pass
 
-# ---------------- MAIN LOOP ----------------
-print("AI Libraries loaded. Starting Main Loop...")
-last_signal = None
+# --- ۳. منطق اصلی و لود مدل ---
+print("All libraries loaded. Initializing Model...")
 exchange = ccxt.mexc()
 
-# لود اولیه مدل خارج از حلقه
 if os.path.exists(MODEL_FILE):
     model = load_model(MODEL_FILE)
 else:
@@ -97,6 +89,8 @@ else:
         Dense(1, activation="sigmoid")
     ])
     model.compile(optimizer="adam", loss="binary_crossentropy")
+
+last_signal = None
 
 while True:
     try:
@@ -109,16 +103,16 @@ while True:
         prob = float(model.predict(X_input, verbose=0)[0][0])
         direction = "UP" if prob > 0.52 else "DOWN"
         price = float(exchange.fetch_ticker("BTC/USDT")['last'])
-
-        # ارسال نرمال
+        
+        # سیگنال نرمال
         send_telegram(f"📊 NORMAL SIGNAL\nDir: {direction}\nPrice: {price:,.2f}", CHANNEL_1)
 
-        # ارسال پرو (اگر وین‌ریت بالای ۷۰٪ باشد)
+        # منطق پرو
         is_pro, count, wr = get_pro_stats()
         if is_pro:
-            send_telegram(f"💎 PRO VIP\nDir: {direction}\nWinrate: {wr:.1%}\nPatterns: {count}", CHANNEL_3_PRO)
+            send_telegram(f"💎 PRO VIP SIGNAL\nDir: {direction}\nWinrate: {wr:.1%}", CHANNEL_3_PRO)
 
-        # ثبت نتیجه سیگنال قبلی
+        # ذخیره برای یادگیری پرو
         if last_signal:
             success = int((last_signal['dir'] == "UP" and price > last_signal['p']) or 
                           (last_signal['dir'] == "DOWN" and price < last_signal['p']))
@@ -126,7 +120,6 @@ while True:
 
         last_signal = {'p': price, 'dir': direction}
         time.sleep(600)
-
     except Exception as e:
         print(f"Error: {e}")
         time.sleep(60)
