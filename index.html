@@ -1,11 +1,45 @@
 <!DOCTYPE html>
-<html>
+<html lang="fa" dir="rtl">
 <head>
-    <meta http-equiv="refresh" content="300">
-    <title>Bot Monitoring</title>
+    <meta charset="UTF-8">
+    <title>مانیتورینگ سیگنال‌های پرو VIP</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: Tahoma, sans-serif; margin: 0; display: flex; justify-content: center; padding: 20px; }
+        .container { width: 100%; max-width: 900px; }
+        .header { background: #1e293b; padding: 20px; border-radius: 15px; border: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .status { color: #22c55e; font-size: 0.8rem; display: flex; align-items: center; gap: 5px; }
+        .dot { width: 10px; height: 10px; background: #22c55e; border-radius: 50%; box-shadow: 0 0 10px #22c55e; }
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }
+        th, td { padding: 15px; text-align: center; border-bottom: 1px solid #334155; }
+        th { color: #94a3b8; font-weight: normal; font-size: 0.9rem; }
+        .up { color: #4ade80; font-weight: bold; }
+        .down { color: #f87171; font-weight: bold; }
+    </style>
 </head>
-<body style="background-color: black; color: green; text-align: center; font-family: Arial;">
-    <h1>ربات کانال پرو وی ای پی سیگنال 10 بیت کوین در حال ران هست</h1>
-    <p>الگو سازی فعال است و پس از سیگنال سوم VIP، اولین سیگنال Pro صادر می‌شود.</p>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1 style="margin:0; font-size: 1.5rem;">مانیتورینگ پرو وی‌آی‌پی</h1>
+                <p style="margin:5px 0 0 0; color:#94a3b8; font-size: 0.8rem;">الگوسازی فعال است | پایش زنده بیت‌کوین</p>
+            </div>
+            <div class="status"><div class="dot"></div> سیستم در حال اجراست</div>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>زمان</th>
+                    <th>جهت</th>
+                    <th>قیمت (USDT)</th>
+                    <th>اطمینان</th>
+                    <th>وضعیت بازار</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{TABLE_ROWS}}
+            </tbody>
+        </table>
+    </div>
 </body>
 </html>
