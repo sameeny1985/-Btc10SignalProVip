@@ -26,7 +26,7 @@ CHANNEL_PRO_VIP = -1003764001634
 HISTORY_FILE = "trading_history.csv"
 MODEL_FILE = "lstm_model.h5"
 # ==========================================
-
+web_signals_history = []
 # ---------------- TELEGRAM ----------------
 def send_telegram(msg, chat_id):
     import requests
@@ -124,14 +124,45 @@ def save_trade(data):
     )
 
 # ---------------- SERVER (FIXED PORT) ----------------
+# ---------------- SERVER (WITH DASHBOARD) ----------------
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b"alive")
+        
+        # ۱. خوندن فایل اچ‌تی‌ام‌ال
+        try:
+            with open('index.html', 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            content = "<html><body style='background:black;color:white;'>فایل index.html پیدا نشد!</body></html>"
+
+        # ۲. ساختن ردیف‌های جدول از حافظه ربات
+        rows = ""
+        # متغیر web_signals_history رو چند لحظه دیگه بالاتر تعریف می‌کنیم
+        for s in reversed(web_signals_history):
+            color = "#4ade80" if "UP" in s['dir'] else "#f87171"
+            rows += f"""
+            <tr style="border-bottom: 1px solid #334155;">
+                <td style="padding:12px;">{s['time']}</td>
+                <td style="padding:12px; color:{color}; font-weight:bold;">{s['dir']}</td>
+                <td style="padding:12px;">{s['price']}</td>
+                <td style="padding:12px;">{s['conf']}</td>
+                <td style="padding:12px; color:#94a3b8;">{s['regime']}</td>
+            </tr>
+            """
+
+        # ۳. تزریق ردیف‌ها به فایل اصلی
+        final_html = content.replace("{{TABLE_ROWS}}", rows if rows else "<tr><td colspan='5' style='text-align:center;padding:20px;'>در انتظار اولین سیگنال...</td></tr>")
+        self.wfile.write(final_html.encode('utf-8'))
 
 PORT = int(os.environ.get("PORT", 10000))
 
+def run_server():
+    # حتماً اینجا هم Handler رو بذار
+    server = HTTPServer(('0.0.0.0', PORT), Handler)
+    server.serve_forever()
 def run_server():
     server = HTTPServer(('0.0.0.0', PORT), Handler)
     server.serve_forever()
@@ -259,7 +290,17 @@ while True:
             "confidence": base_prob,
             "volatility": volatility
         }
-
+# ذخیره اطلاعات برای نمایش در صفحه وب (داشبورد)
+        web_signals_history.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "dir": direction,
+            "price": f"{price:,.2f}",
+            "conf": f"{base_prob:.2%}",
+            "regime": regime
+        })
+        # فقط ۱۰ تای آخر رو نگه دار که حافظه پر نشه
+        if len(web_signals_history) > 10:
+            web_signals_history.pop(0)
         time.sleep(SLEEP_SECONDS)
 
     except Exception as e:
