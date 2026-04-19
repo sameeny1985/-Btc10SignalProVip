@@ -1,14 +1,16 @@
+import os
 import time
-from datetime import datetime
+import requests
 import numpy as np
 import pandas as pd
+import ccxt
+import psycopg2  # اضافه شد برای اتصال به دیتابیس سوپابیس
+import threading
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 from xgboost import XGBClassifier
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
-import ccxt
-import threading
-import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= CONFIG =================
@@ -150,7 +152,7 @@ def get_db_slot_count():
         return slot, count
     except:
         return f"{datetime.now().hour}:{datetime.now().minute // 10}", 0
-# ================= MAIN LOOP =================
+# ================= MAIN LOOP WITH PRO FILTER =================
 while True:
     try:
         df = get_ohlcv()
@@ -160,7 +162,7 @@ while True:
             time.sleep(60)
             continue
 
-        # -------- LSTM MODEL --------
+        # -------- هوش مصنوعی (LSTM + XGB) --------
         if os.path.exists(MODEL_FILE):
             lstm = load_model(MODEL_FILE)
         else:
@@ -170,13 +172,11 @@ while True:
         lstm.save(MODEL_FILE)
 
         lstm_prob = float(lstm.predict(X[-1].reshape(1,*X[-1].shape))[0][0])
-
-        # -------- XGBOOST MODEL --------
         xgb = XGBClassifier(n_estimators=30)
         xgb.fit(df.values[LOOKBACK:-1], y)
         xgb_prob = xgb.predict_proba(df.values[-1].reshape(1,-1))[0][1]
 
-        # ترکیب دو مدل
+        # میانگین احتمالات
         base_prob = (lstm_prob + xgb_prob) / 2
         regime, threshold, volatility = market_regime(df)
         direction = "UP" if base_prob > threshold else "DOWN"
@@ -185,75 +185,74 @@ while True:
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M:%S")
+        slot, seq = get_db_slot_count()
 
-        # 1️⃣ ارسال سیگنال عادی (Normal Channel)
+        # 1️⃣ همیشه ارسال به کانال نرمال (بدون فیلتر سخت‌گیرانه)
         msg_normal = (
-            f"⚠️ **SHAPYAAR Btc Signal**\n"
+            f"📊 **NORMAL SIGNAL**\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🪙 **Symbol:** #BTC / USDT\n"
-            f"📅 **Date:** `{date_str}`\n"
-            f"⏰ **Time:** `{time_str}` (UTC)\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🔔 **Direction:** {direction} {'🟢' if direction=='UP' else '🔴'}\n"
-            f"💵 **Price:** `${price:,.2f}`\n"
-            f"📊 **Regime:** {regime}\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🆔 @Btc10SignalProVip"
+            f"🔔 Direction: {direction} {'🟢' if direction=='UP' else '🔴'}\n"
+            f"💵 Price: `${price:,.2f}`\n"
+            f"🎯 Confidence: {base_prob:.2%}\n"
+            f"⏰ {time_str}"
         )
         send_telegram(msg_normal, CHANNEL_1)
 
-        # 2️⃣ ارسال سیگنال پرو (VIP Channel - منطق زمانی)
-        slot, seq = get_db_slot_count() # فراخوانی تابع دیتابیس
+        # 2️⃣ بررسی شرایط ویژه برای کانال "پرو وی‌آی‌پی" (Smart Filter)
+        # الف) محاسبه وین‌ریت تاریخی اسلات جاری از دیتابیس
+        historic_winrate = 0
+        try:
+            conn = psycopg2.connect(DB_PARAMS)
+            cur = conn.cursor()
+            cur.execute("SELECT AVG(result) FROM pro_logic WHERE hour_slot = %s", (slot,))
+            res = cur.fetchone()[0]
+            historic_winrate = float(res) if res is not None else 0.0
+            cur.close(); conn.close()
+        except: pass
 
-        vip_text = (
-            f"💎 **SHAPYAAR Btc VIP Signal**\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🪙 **Symbol:** #BTC / USDT\n"
-            f"📅 **Date:** `{date_str}`\n"
-            f"⏰ **Time:** `{time_str}`\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🚀 **Action:** {'BUY' if direction=='UP' else 'SELL'} {'🟢' if direction=='UP' else '🔴'}\n"
-            f"📉 **Entry Price:** `${price:,.2f}`\n"
-            f"🎯 **Confidence:** {base_prob:.2%}\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"📥 **Data Analysis:**\n"
-            f"📍 **Slot ID:** `{slot}0` (Time-Based)\n"
-            f"🔢 **Sequence:** `#{seq + 1}`\n"
-            f"🧠 **Model:** Hybrid LSTM+XGB\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"👑 **VIP EXCLUSIVE**"
-        )
-        send_telegram(vip_text, CHANNEL_PRO_VIP)
+        # ب) شروط فیلتر طلایی:
+        # ۱. اطمینان مدل بالاتر از ۷۰٪ یا کمتر از ۳۰٪ باشد
+        # ۲. یا اینکه وین‌ریت تاریخی این ساعت بالای ۶۰٪ باشد
+        is_pro_signal = (base_prob >= 0.70 or base_prob <= 0.30) or (historic_winrate >= 0.60)
 
-        # 3️⃣ بررسی سیگنال قبلی و ذخیره در دیتابیس (VALIDATE)
+        if is_pro_signal:
+            vip_text = (
+                f"💎 **PRO VIP GOLDEN SIGNAL**\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🪙 #BTC / USDT\n"
+                f"🚀 **Action:** {'BUY' if direction=='UP' else 'SELL'} {'✅'}\n"
+                f"📉 **Entry Price:** `${price:,.2f}`\n"
+                f"🎯 **Probability:** {max(base_prob, 1-base_prob):.2%}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📊 **Analysis Logic:**\n"
+                f"📍 Slot Winrate: `{historic_winrate:.1%}`\n"
+                f"🔢 Sequence: `#{seq + 1}`\n"
+                f"🧠 Regime: {regime}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"⏰ {date_str} {time_str}\n"
+                f"👑 **PRO VIP EXCLUSIVE**"
+            )
+            send_telegram(vip_text, CHANNEL_PRO_VIP)
+            print("🔥 Golden Signal sent to PRO VIP")
+        else:
+            print("ℹ️ Signal filtered: Not strong enough for PRO VIP")
+
+        # 3️⃣ ثبت برای اعتبارسنجی دوره بعد
         if last_trade:
             correct = int(
                 (last_trade["direction"]=="UP" and price > last_trade["price"]) or
                 (last_trade["direction"]=="DOWN" and price < last_trade["price"])
             )
-
-            # ذخیره در فایل محلی CSV
-            save_trade({
-                "confidence": last_trade["confidence"],
-                "volatility": last_trade["volatility"],
-                "result": correct
-            })
-
-            # ذخیره در دیتابیس سوپابیس (Supabase)
+            # ذخیره در سوپابیس برای الگوسازی‌های بعدی
             try:
-                import psycopg2
                 conn = psycopg2.connect(DB_PARAMS)
                 cur = conn.cursor()
                 db_slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
                 cur.execute("INSERT INTO pro_logic (hour_slot, direction, price, result) VALUES (%s, %s, %s, %s)",
                             (db_slot, last_trade["direction"], last_trade["price"], correct))
-                conn.commit()
-                cur.close()
-                conn.close()
-            except Exception as db_err:
-                print(f"DB Error: {db_err}")
+                conn.commit(); cur.close(); conn.close()
+            except: pass
 
-        # آپدیت برای سیگنال بعدی
         last_trade = {
             "price": price,
             "direction": direction,
@@ -264,5 +263,5 @@ while True:
         time.sleep(SLEEP_SECONDS)
 
     except Exception as e:
-        print("ERROR IN LOOP:", e)
+        print("ERROR:", e)
         time.sleep(60)
