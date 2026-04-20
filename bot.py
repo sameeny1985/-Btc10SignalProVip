@@ -12,7 +12,8 @@ from xgboost import XGBClassifier
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
+import os, time, requests, threading
+from datetime import datetime, timedelta
 # ================= CONFIG =================
 LOOKBACK = 60
 SLEEP_SECONDS = 600
@@ -176,13 +177,13 @@ def get_db_slot_count():
     try:
         conn = psycopg2.connect(DB_PARAMS)
         cur = conn.cursor()
-        slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
+        slot = f"{datetime.now().hour}:{datetime.now().minute // 15}"
         cur.execute("SELECT COUNT(id) FROM pro_logic WHERE hour_slot = %s", (slot,))
         count = cur.fetchone()[0]
         cur.close(); conn.close()
         return slot, count
     except:
-        return f"{datetime.now().hour}:{datetime.now().minute // 10}", 0
+        return f"{datetime.now().hour}:{datetime.now().minute // 15}", 0
 # ================= MAIN LOOP WITH PRO FILTER =================
 while True:
     try:
@@ -278,7 +279,7 @@ while True:
             try:
                 conn = psycopg2.connect(DB_PARAMS)
                 cur = conn.cursor()
-                db_slot = f"{datetime.now().hour}:{datetime.now().minute // 10}"
+                db_slot = f"{datetime.now().hour}:{datetime.now().minute // 15}"
                 cur.execute("INSERT INTO pro_logic (hour_slot, direction, price, result) VALUES (%s, %s, %s, %s)",
                             (db_slot, last_trade["direction"], last_trade["price"], correct))
                 conn.commit(); cur.close(); conn.close()
@@ -305,4 +306,17 @@ while True:
 
     except Exception as e:
         print("ERROR:", e)
-        time.sleep(60)
+        # محاسبه زمان انتظار تا ۱۵ دقیقه رند بعدی (ثانیه ۱۰)
+        now = datetime.now()
+        minutes_to_wait = 15 - (now.minute % 15)
+        # اگر در دقیقه رند هستیم و ثانیه از ۱۰ رد شده، برو برای ۱۵ دقیقه بعد
+        if minutes_to_wait == 15 and now.second > 10:
+             next_run = now.replace(minute=now.minute, second=10, microsecond=0) + timedelta(minutes=15)
+        else:
+             next_run = now.replace(second=10, microsecond=0) + timedelta(minutes=minutes_to_wait if minutes_to_wait < 15 else 0)
+
+        wait_seconds = (next_run - datetime.now()).total_seconds()
+        if wait_seconds < 0: wait_seconds = 900
+            
+        print(f"💤 Next PRO Signal at: {next_run.strftime('%H:%M:%S')}")
+        time.sleep(wait_seconds)
