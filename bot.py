@@ -53,18 +53,18 @@ def market_regime(df):
     close = df['c']
     returns = close.pct_change()
 
-    trend = close.iloc[-1] - close.iloc[-20]
+    trend = close.iloc[-1] - close.iloc[-10]
     volatility = returns.std()
 
-    if trend > 100:
+    if trend > 30:
         regime = "BULL"
-        threshold = 0.52
-    elif trend < -100:
+        threshold = 0.55
+    elif trend < -30:
         regime = "BEAR"
-        threshold = 0.52
+        threshold = 0.55
     else:
         regime = "RANGE"
-        threshold = 0.60
+        threshold = 0.62
 
     return regime, threshold, volatility
 
@@ -124,7 +124,6 @@ def save_trade(data):
         index=False
     )
 
-# ---------------- SERVER (FIXED PORT) ----------------
 # ---------------- SERVER (WITH DASHBOARD) ----------------
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -184,6 +183,14 @@ def get_db_slot_count():
         return slot, count
     except:
         return f"{datetime.now().hour}:{datetime.now().minute // 15}", 0
+# --- کد پاکسازی موقت مدل قدیمی ---
+if os.path.exists(MODEL_FILE):
+    try:
+        os.remove(MODEL_FILE)
+        print("🗑️ Old model deleted successfully! Training from scratch...")
+    except:
+        pass
+# ------------------------------
 # ================= MAIN LOOP WITH PRO FILTER =================
 while True:
     try:
@@ -200,7 +207,7 @@ while True:
         else:
             lstm = build_lstm((X.shape[1], X.shape[2]))
 
-        lstm.fit(X, y, epochs=1, verbose=0)
+        lstm.fit(X, y, epochs=5, verbose=0)
         lstm.save(MODEL_FILE)
 
         lstm_prob = float(lstm.predict(X[-1].reshape(1,*X[-1].shape))[0][0])
