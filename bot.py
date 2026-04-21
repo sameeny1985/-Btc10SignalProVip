@@ -183,14 +183,7 @@ def get_db_slot_count():
         return slot, count
     except:
         return f"{datetime.now().hour}:{datetime.now().minute // 15}", 0
-# --- کد پاکسازی موقت مدل قدیمی ---
-if os.path.exists(MODEL_FILE):
-    try:
-        os.remove(MODEL_FILE)
-        print("🗑️ Old model deleted successfully! Training from scratch...")
-    except:
-        pass
-# ------------------------------
+
 # ================= MAIN LOOP WITH PRO FILTER =================
 while True:
     try:
