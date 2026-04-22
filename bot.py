@@ -199,7 +199,7 @@ while True:
         else:
             lstm = build_lstm((X.shape[1], X.shape[2]))
 
-        lstm.fit(X, y, epochs=1, verbose=0)
+        lstm.fit(X, y, epochs=5, verbose=0)
         lstm.save(MODEL_FILE)
 
         lstm_prob = float(lstm.predict(X[-1].reshape(1,*X[-1].shape))[0][0])
@@ -220,7 +220,7 @@ while True:
 
         # 1️⃣ همیشه ارسال به کانال نرمال (بدون فیلتر سخت‌گیرانه)
         msg_normal = (
-            f"📊 **NORMAL SIGNAL**\n"
+            f"📊 **SHAPYAAR BTC NORMAL SIGNAL**\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🔔 Direction: {direction} {'🟢' if direction=='UP' else '🔴'}\n"
             f"💵 Price: `${price:,.2f}`\n"
@@ -248,7 +248,7 @@ while True:
 
         if is_pro_signal:
             vip_text = (
-                f"💎 **PRO VIP GOLDEN SIGNAL**\n"
+                f"💎 **SHAPYAAR BTC PRO VIP SIGNAL**\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 #BTC / USDT\n"
                 f"🚀 **Action:** {'BUY' if direction=='UP' else 'SELL'} {'✅'}\n"
